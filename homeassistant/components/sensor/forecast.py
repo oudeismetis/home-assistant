@@ -48,29 +48,11 @@ MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=120)
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Setup the Forecast.io sensor."""
-    # import forecastio
 
-    if None in (hass.config.latitude, hass.config.longitude):
-        _LOGGER.error("Latitude or longitude not set in Home Assistant config")
+    api_key = config.get(CONF_API_KEY, None)
+    if None in (hass.config.latitude, hass.config.longitude, api_key):
+        _LOGGER.error("Latitude, longitude, or API key missing from config")
         return False
-
-    """
-    try:
-        forecast = forecastio.load_forecast(config.get(CONF_API_KEY, None),
-                                            hass.config.latitude,
-                                            hass.config.longitude)
-        forecast.currently()
-    except ValueError:
-        _LOGGER.error(
-            "Connection error "
-            "Please check your settings for Forecast.io.")
-        return False
-    """
-
-    for variable in config['monitored_conditions']:
-        if variable not in SENSOR_TYPES:
-            _LOGGER.error('Sensor type: "%s" does not exist', variable)
-            return False
 
     if 'units' in config:
         units = config['units']
@@ -79,30 +61,36 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     else:
         units = 'us'
 
-    sensor = ForeCastSensor(
-        config.get(CONF_API_KEY, None), hass.config.latitude,
-        hass.config.longitude, units, variable)
+    sensor_data = ForeCastData(api_key, hass.config.latitude,
+                               hass.config.longitude, units)
 
-    if not sensor.state:
-        _LOGGER.error(
-            "Connection error "
-            "Please check your settings for Forecast.io.")
-        return False
+    sensors = []
+    for variable in config['monitored_conditions']:
+        print('looking for: ', variable)
+        if variable not in SENSOR_TYPES:
+            _LOGGER.error('Sensor type: "%s" does not exist', variable)
+            return False
+        else:
+            sensor = ForeCastSensor(sensor_data, variable)
+            if not sensor.state:
+                _LOGGER.error(
+                    "Connection error "
+                    "Please check your settings for Forecast.io.")
+                return False
+            sensors.append(sensor)
 
-    add_devices([sensor])
+    add_devices(sensors)
 
 
 class ForeCastSensor(Entity):
     """Implementation of a Forecast.io sensor."""
 
-    def __init__(self, api_key, latitude, longitude, units, sensor_type):
+    def __init__(self, data_sdk, sensor_type):
         """Initialize the sensor."""
-        self._api_key = api_key
-        self.latitude = latitude
-        self.longitude = longitude
-        self.units = units
 
-        self.data = None
+        self.sdk = data_sdk
+
+        # self.data = None
         self._unit_system = None
         self._unit_of_measurement = None
         self.data_currently = None
@@ -140,12 +128,11 @@ class ForeCastSensor(Entity):
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update(self):
         """Get the latest data from Forecast.io and updates the states."""
-        import forecastio
 
-        self.data = forecastio.load_forecast(self._api_key,
-                                             self.latitude,
-                                             self.longitude,
-                                             units=self.units)
+        import forecastio
+        print('Inside update for forecast')
+
+        self.sdk.update()
         self.update_unit_of_measure()
 
         try:
@@ -173,26 +160,26 @@ class ForeCastSensor(Entity):
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update_currently(self):
         """Update currently data."""
-        self.data_currently = self.data.currently()
+        self.data_currently = self.sdk.data.currently()
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update_minutely(self):
         """Update minutely data."""
-        self.data_minutely = self.data.minutely()
+        self.data_minutely = self.sdk.data.minutely()
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update_hourly(self):
         """Update hourly data."""
-        self.data_hourly = self.data.hourly()
+        self.data_hourly = self.sdk.data.hourly()
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update_daily(self):
         """Update daily data."""
-        self.data_daily = self.data.daily()
+        self.data_daily = self.sdk.data.daily()
 
     def update_unit_of_measure(self):
         """Convert received units to ones we understand."""
-        unit_system = self.data.json['flags']['units']
+        unit_system = self.sdk.data.json['flags']['units']
         if unit_system == 'si':
             self._unit_of_measurement = SENSOR_TYPES[self.type][1]
         elif unit_system == 'us':
@@ -204,43 +191,67 @@ class ForeCastSensor(Entity):
         elif unit_system == 'uk2':
             self._unit_of_measurement = SENSOR_TYPES[self.type][5]
 
-    def update_state(self, data):
+    def update_state(self, current_data):
         """Update the current state of the sensor"""
         import forecastio
         try:
             if self.type == 'summary':
-                self._state = data.summary
+                self._state = current_data.summary
             elif self.type == 'icon':
-                self._state = data.icon
+                self._state = current_data.icon
             elif self.type == 'nearest_storm_distance':
-                self._state = data.nearestStormDistance
+                self._state = current_data.nearestStormDistance
             elif self.type == 'nearest_storm_bearing':
-                self._state = data.nearestStormBearing
+                self._state = current_data.nearestStormBearing
             elif self.type == 'precip_intensity':
-                self._state = data.precipIntensity
+                self._state = current_data.precipIntensity
             elif self.type == 'precip_type':
-                self._state = data.precipType
+                self._state = current_data.precipType
             elif self.type == 'precip_probability':
-                self._state = round(data.precipProbability * 100, 1)
+                self._state = round(current_data.precipProbability * 100, 1)
             elif self.type == 'dew_point':
-                self._state = round(data.dewPoint, 1)
+                self._state = round(current_data.dewPoint, 1)
             elif self.type == 'temperature':
-                self._state = round(data.temperature, 1)
+                self._state = round(current_data.temperature, 1)
             elif self.type == 'apparent_temperature':
-                self._state = round(data.apparentTemperature, 1)
+                self._state = round(current_data.apparentTemperature, 1)
             elif self.type == 'wind_speed':
-                self._state = data.windSpeed
+                self._state = current_data.windSpeed
             elif self.type == 'wind_bearing':
-                self._state = data.windBearing
+                self._state = current_data.windBearing
             elif self.type == 'cloud_cover':
-                self._state = round(data.cloudCover * 100, 1)
+                self._state = round(current_data.cloudCover * 100, 1)
             elif self.type == 'humidity':
-                self._state = round(data.humidity * 100, 1)
+                self._state = round(current_data.humidity * 100, 1)
             elif self.type == 'pressure':
-                self._state = round(data.pressure, 1)
+                self._state = round(current_data.pressure, 1)
             elif self.type == 'visibility':
-                self._state = data.visibility
+                self._state = current_data.visibility
             elif self.type == 'ozone':
-                self._state = round(data.ozone, 1)
+                self._state = round(current_data.ozone, 1)
         except forecastio.utils.PropertyUnavailable:
             pass
+
+
+class ForeCastData(object):
+    """Gets the latest data from Forecast.io."""
+
+    def __init__(self, api_key, latitude, longitude, units):
+        """Initialize the data object."""
+        self._api_key = api_key
+        self.latitude = latitude
+        self.longitude = longitude
+        self.units = units
+        self.data = None
+
+        self.update()
+
+    @Throttle(MIN_TIME_BETWEEN_UPDATES)
+    def update(self):
+        """Get the latest data from Forecast.io and updates the states."""
+        import forecastio
+
+        self.data = forecastio.load_forecast(self._api_key,
+                                             self.latitude,
+                                             self.longitude,
+                                             units=self.units)
