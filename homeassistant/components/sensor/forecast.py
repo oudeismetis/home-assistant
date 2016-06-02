@@ -48,12 +48,13 @@ MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=120)
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Setup the Forecast.io sensor."""
-    import forecastio
+    # import forecastio
 
     if None in (hass.config.latitude, hass.config.longitude):
         _LOGGER.error("Latitude or longitude not set in Home Assistant config")
         return False
 
+    """
     try:
         forecast = forecastio.load_forecast(config.get(CONF_API_KEY, None),
                                             hass.config.latitude,
@@ -64,6 +65,12 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
             "Connection error "
             "Please check your settings for Forecast.io.")
         return False
+    """
+
+    for variable in config['monitored_conditions']:
+        if variable not in SENSOR_TYPES:
+            _LOGGER.error('Sensor type: "%s" does not exist', variable)
+            return False
 
     if 'units' in config:
         units = config['units']
@@ -72,43 +79,42 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     else:
         units = 'us'
 
-    data = ForeCastData(config.get(CONF_API_KEY, None),
-                        hass.config.latitude,
-                        hass.config.longitude,
-                        units)
+    sensor = ForeCastSensor(
+        config.get(CONF_API_KEY, None), hass.config.latitude,
+        hass.config.longitude, units, variable)
 
-    dev = []
-    for variable in config['monitored_conditions']:
-        if variable not in SENSOR_TYPES:
-            _LOGGER.error('Sensor type: "%s" does not exist', variable)
-        else:
-            dev.append(ForeCastSensor(data, variable))
+    if not sensor.state:
+        _LOGGER.error(
+            "Connection error "
+            "Please check your settings for Forecast.io.")
+        return False
 
-    add_devices(dev)
+    add_devices([sensor])
 
 
-# pylint: disable=too-few-public-methods
 class ForeCastSensor(Entity):
     """Implementation of a Forecast.io sensor."""
 
-    def __init__(self, weather_data, sensor_type):
+    def __init__(self, api_key, latitude, longitude, units, sensor_type):
         """Initialize the sensor."""
+        self._api_key = api_key
+        self.latitude = latitude
+        self.longitude = longitude
+        self.units = units
+
+        self.data = None
+        self._unit_system = None
+        self._unit_of_measurement = None
+        self.data_currently = None
+        self.data_minutely = None
+        self.data_hourly = None
+        self.data_daily = None
+
         self.client_name = 'Weather'
         self._name = SENSOR_TYPES[sensor_type][0]
-        self.forecast_client = weather_data
         self.type = sensor_type
         self._state = None
-        self._unit_system = self.forecast_client.unit_system
-        if self._unit_system == 'si':
-            self._unit_of_measurement = SENSOR_TYPES[self.type][1]
-        elif self._unit_system == 'us':
-            self._unit_of_measurement = SENSOR_TYPES[self.type][2]
-        elif self._unit_system == 'ca':
-            self._unit_of_measurement = SENSOR_TYPES[self.type][3]
-        elif self._unit_system == 'uk':
-            self._unit_of_measurement = SENSOR_TYPES[self.type][4]
-        elif self._unit_system == 'uk2':
-            self._unit_of_measurement = SENSOR_TYPES[self.type][5]
+
         self.update()
 
     @property
@@ -131,35 +137,76 @@ class ForeCastSensor(Entity):
         """Return the unit system of this entity."""
         return self._unit_system
 
-    # pylint: disable=too-many-branches,too-many-statements
+    @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update(self):
         """Get the latest data from Forecast.io and updates the states."""
         import forecastio
 
-        self.forecast_client.update()
+        self.data = forecastio.load_forecast(self._api_key,
+                                             self.latitude,
+                                             self.longitude,
+                                             units=self.units)
+        self.update_unit_of_measure()
 
         try:
             if self.type == 'minutely_summary':
-                self.forecast_client.update_minutely()
-                self._state = self.forecast_client.data_minutely.summary
+                self.update_minutely()
+                self._state = self.data_minutely.summary
                 return
 
             elif self.type == 'hourly_summary':
-                self.forecast_client.update_hourly()
-                self._state = self.forecast_client.data_hourly.summary
+                self.update_hourly()
+                self._state = self.data_hourly.summary
                 return
 
             elif self.type == 'daily_summary':
-                self.forecast_client.update_daily()
-                self._state = self.forecast_client.data_daily.summary
+                self.update_daily()
+                self._state = self.data_daily.summary
                 return
 
         except forecastio.utils.PropertyUnavailable:
             return
 
-        self.forecast_client.update_currently()
-        data = self.forecast_client.data_currently
+        self.update_currently()
+        self.update_state(self.data_currently)
 
+    @Throttle(MIN_TIME_BETWEEN_UPDATES)
+    def update_currently(self):
+        """Update currently data."""
+        self.data_currently = self.data.currently()
+
+    @Throttle(MIN_TIME_BETWEEN_UPDATES)
+    def update_minutely(self):
+        """Update minutely data."""
+        self.data_minutely = self.data.minutely()
+
+    @Throttle(MIN_TIME_BETWEEN_UPDATES)
+    def update_hourly(self):
+        """Update hourly data."""
+        self.data_hourly = self.data.hourly()
+
+    @Throttle(MIN_TIME_BETWEEN_UPDATES)
+    def update_daily(self):
+        """Update daily data."""
+        self.data_daily = self.data.daily()
+
+    def update_unit_of_measure(self):
+        """Convert received units to ones we understand."""
+        unit_system = self.data.json['flags']['units']
+        if unit_system == 'si':
+            self._unit_of_measurement = SENSOR_TYPES[self.type][1]
+        elif unit_system == 'us':
+            self._unit_of_measurement = SENSOR_TYPES[self.type][2]
+        elif unit_system == 'ca':
+            self._unit_of_measurement = SENSOR_TYPES[self.type][3]
+        elif unit_system == 'uk':
+            self._unit_of_measurement = SENSOR_TYPES[self.type][4]
+        elif unit_system == 'uk2':
+            self._unit_of_measurement = SENSOR_TYPES[self.type][5]
+
+    def update_state(self, data):
+        """Update the current state of the sensor"""
+        import forecastio
         try:
             if self.type == 'summary':
                 self._state = data.summary
@@ -195,59 +242,5 @@ class ForeCastSensor(Entity):
                 self._state = data.visibility
             elif self.type == 'ozone':
                 self._state = round(data.ozone, 1)
-
         except forecastio.utils.PropertyUnavailable:
             pass
-
-
-class ForeCastData(object):
-    """Gets the latest data from Forecast.io."""
-
-    # pylint: disable=too-many-instance-attributes
-
-    def __init__(self, api_key, latitude, longitude, units):
-        """Initialize the data object."""
-        self._api_key = api_key
-        self.latitude = latitude
-        self.longitude = longitude
-        self.units = units
-
-        self.data = None
-        self.unit_system = None
-        self.data_currently = None
-        self.data_minutely = None
-        self.data_hourly = None
-        self.data_daily = None
-
-        self.update()
-
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def update(self):
-        """Get the latest data from Forecast.io."""
-        import forecastio
-
-        self.data = forecastio.load_forecast(self._api_key,
-                                             self.latitude,
-                                             self.longitude,
-                                             units=self.units)
-        self.unit_system = self.data.json['flags']['units']
-
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def update_currently(self):
-        """Update currently data."""
-        self.data_currently = self.data.currently()
-
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def update_minutely(self):
-        """Update minutely data."""
-        self.data_minutely = self.data.minutely()
-
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def update_hourly(self):
-        """Update hourly data."""
-        self.data_hourly = self.data.hourly()
-
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def update_daily(self):
-        """Update daily data."""
-        self.data_daily = self.data.daily()
